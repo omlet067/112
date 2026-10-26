@@ -412,6 +412,75 @@ async def msg_admin_home(message: Message, state: FSMContext):
         [("💭 Мысли", "admin:thoughts")],
     ]))
 
+@router.callback_query(F.data.startswith("admin:users:"))
+async def admin_users_list(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer("Нет доступа.", show_alert=True)
+    try:
+        page = int(call.data.split(":")[2])
+    except (ValueError, IndexError):
+        page = 0
+    limit = 10
+    offset = page * limit
+    
+    with connect() as con:
+        total = con.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
+        rows = con.execute("""
+            SELECT u.telegram_id, u.status, p.nickname 
+            FROM users u 
+            LEFT JOIN profiles p ON p.telegram_id = u.telegram_id 
+            ORDER BY u.created_at DESC 
+            LIMIT ? OFFSET ?
+        """, (limit, offset)).fetchall()
+        
+    if not rows:
+        await edit_message(call, "На этой странице нет пользователей.", reply_markup=back("admin:home"))
+        return await call.answer()
+        
+    total_pages = max(1, (total + limit - 1) // limit)
+    text = f"👥 <b>Пользователи</b> (Стр. {page + 1}/{total_pages})\nВсего: {total}\n\n"
+    buttons = []
+    
+    for r in rows:
+        icon = "🔴" if r["status"] == "banned" else "🟢"
+        name = r["nickname"] or "Без анкеты"
+        action = "unban" if r["status"] == "banned" else "ban"
+        buttons.append([(f"{icon} {name} (ID: {r['telegram_id']})", f"admin:user_toggle:{action}:{r['telegram_id']}")])
+        
+    nav = []
+    if page > 0:
+        nav.append(("⬅️ Стр.", f"admin:users:{page - 1}"))
+    if offset + limit < total:
+        nav.append(("Стр. ➡️", f"admin:users:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+        
+    buttons.append([("⬅️ Админ-панель", "admin:home")])
+    await edit_message(call, text, reply_markup=keyboard(buttons))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("admin:user_toggle:"))
+async def admin_user_toggle(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        return await call.answer("Нет доступа.", show_alert=True)
+    parts = call.data.split(":")
+    if len(parts) != 4:
+        return await call.answer("Некорректный запрос.", show_alert=True)
+    action, target_id = parts[2], int(parts[3])
+    
+    if target_id == call.from_user.id:
+        return await call.answer("Себя банить нельзя.", show_alert=True)
+        
+    new_status = "banned" if action == "ban" else "active"
+    with connect() as con:
+        con.execute("UPDATE users SET status=? WHERE telegram_id=?", (new_status, target_id))
+        
+    await call.answer("Готово" if new_status == "active" else "Забанен")
+    
+    # Обновляем список
+    call.data = "admin:users:0"
+    await admin_users_list(call)
 
 @router.message(Command("ban"))
 async def admin_ban(message: Message):
@@ -429,6 +498,7 @@ async def admin_ban(message: Message):
             return await message.answer(f"❌ Пользователь с ID <code>{target_id}</code> не найден в базе.")
         con.execute("UPDATE users SET status='banned' WHERE telegram_id=?", (target_id,))
     await message.answer(f"✅ Пользователь <code>{target_id}</code> заблокирован.")
+
 
 
 @router.message(Command("unban"))
