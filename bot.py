@@ -1,4 +1,4 @@
-import asyncio  # FIX: добавлен импорт, иначе бот падает
+import asyncio
 import logging
 import os
 import re
@@ -287,27 +287,67 @@ def time_ago(dt_str):
         return dt_str
 
 
-async def show_public_profile(call: CallbackQuery, target_id: int, back_target="home"):
+from aiogram.types import InputMediaPhoto
+
+async def show_public_profile(call: CallbackQuery, target_id: int, back_target="directory:home"):
     uid = call.from_user.id
     with connect() as con:
         row = con.execute("""SELECT p.* FROM profiles p JOIN users u ON u.telegram_id=p.telegram_id
           WHERE p.telegram_id=? AND p.visibility='published' AND u.status='active'""", (target_id,)).fetchone()
         blocked = con.execute("SELECT 1 FROM blocks WHERE blocker_id=? AND blocked_id=?", (uid, target_id)).fetchone()
-    if not row or blocked:
-        return await edit_message(call, "Анкета недоступна.", reply_markup=back(back_target))
+        
+        if not row or blocked:
+            return await edit_message(call, "Анкета недоступна.", reply_markup=back(back_target))
+            
+        # Ищем следующую и предыдущую анкеты для листания
+        next_row = con.execute("""SELECT telegram_id FROM profiles 
+            WHERE visibility='published' AND telegram_id > ? 
+            AND telegram_id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id=?)
+            ORDER BY telegram_id ASC LIMIT 1""", (target_id, uid)).fetchone()
+            
+        prev_row = con.execute("""SELECT telegram_id FROM profiles 
+            WHERE visibility='published' AND telegram_id < ? 
+            AND telegram_id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id=?)
+            ORDER BY telegram_id DESC LIMIT 1""", (target_id, uid)).fetchone()
+
     p = dict(row)
-    markup = keyboard([
-        [("🚩 Пожаловаться", f"report:{target_id}"), ("🚫 Заблокировать", f"block:{target_id}")],
-        [("⬅️ Назад", back_target)],
-    ])
+    
+    # Собираем кнопки
+    rows = []
+    nav_row = []
+    if prev_row:
+        nav_row.append(("◀️ Назад", f"directory:show:{prev_row['telegram_id']}"))
+    if next_row:
+        nav_row.append(("Далее ▶️", f"directory:show:{next_row['telegram_id']}"))
+    if nav_row:
+        rows.append(nav_row)
+
+    rows.append([("🚩 Пожаловаться", f"report:{target_id}"), ("🚫 Заблокировать", f"block:{target_id}")])
+    rows.append([("⬅️ В каталог", back_target)])
+    
+    markup = keyboard(rows)
+    caption = profile_text(p)
+    
+    # Пытаемся отредактировать сообщение, чтобы оно не мигало
     try:
-        await call.message.delete()
-    except Exception:
-        pass
-    try:
-        await call.message.answer_photo(p["avatar_file_id"], caption=profile_text(p), reply_markup=markup)
-    except TelegramBadRequest:
-        await call.message.answer(profile_text(p), reply_markup=markup)
+        if getattr(call.message, "photo", None):
+            # Если текущее сообщение уже с фото — редактируем фото
+            await call.message.edit_media(
+                media=InputMediaPhoto(media=p["avatar_file_id"], caption=caption, parse_mode="HTML"),
+                reply_markup=markup
+            )
+        else:
+            # Если было текстовое сообщение (например, нажали из поиска) — удаляем и отправляем фото
+            await call.message.delete()
+            await call.message.answer_photo(p["avatar_file_id"], caption=caption, reply_markup=markup)
+    except TelegramBadRequest as e:
+        # Если фото не изменилось (нажали на ту же анкету) или возникла ошибка
+        if "message is not modified" not in str(e).lower():
+            try:
+                await call.message.delete()
+            except Exception:
+                pass
+            await call.message.answer_photo(p["avatar_file_id"], caption=caption, reply_markup=markup)
 
 
 # ---------------- START / HELP / ADMIN CMDS ----------------
@@ -1730,3 +1770,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
