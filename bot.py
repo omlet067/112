@@ -158,7 +158,21 @@ def init_db():
           PRIMARY KEY (post_id, user_id)
         );
         CREATE INDEX IF NOT EXISTS idx_reactions_post ON reactions(post_id);
-        """)
+                CREATE TABLE IF NOT EXISTS ads(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          author_id INTEGER NOT NULL REFERENCES users(telegram_id),
+          description TEXT NOT NULL,
+          contact TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS ad_photos(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ad_id INTEGER NOT NULL REFERENCES ads(id) ON DELETE CASCADE,
+          file_id TEXT NOT NULL,
+          position INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_ads_status ON ads(status, id DESC);""")
         try:
             con.execute("ALTER TABLE users ADD COLUMN username TEXT DEFAULT ''")
         except sqlite3.OperationalError:
@@ -208,7 +222,8 @@ def main_menu(uid):
 def bottom_menu(uid):
     kb = [
         [KeyboardButton(text="👤 Моя анкета"), KeyboardButton(text="🔎 Каталог")],
-        [KeyboardButton(text="💭 Мысли"), KeyboardButton(text="🏆 Топ-10")], KeyboardButton(text="🛒 Объявления")], # <--- ЗАМЕНИТЬ СТРОКУ
+        [KeyboardButton(text="💭 Мысли"), KeyboardButton(text="🏆 Топ-10")],
+        [KeyboardButton(text="🛒 Объявления")], # <--- Исправлено
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="ℹ️ Помощь")],
     ]
     if is_admin(uid):
@@ -464,7 +479,7 @@ async def msg_admin_home(message: Message, state: FSMContext):
         [("🚩 Жалобы", "admin:reports")],
         [("📢 Рассылка", "admin:broadcast")],
         [("💭 Мысли", "admin:thoughts")],
-                [("🛒 Объявления", "admin:ads")], # <--- В АДМИН-ПАНЕЛЬ
+        [("🛒 Объявления", "admin:ads")], # <--- В АДМИН-ПАНЕЛЬ
     ]))
 
 @router.callback_query(F.data.startswith("admin:users:"))
@@ -2076,4 +2091,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
