@@ -77,6 +77,11 @@ class ThoughtForm(StatesGroup):
     text = State()
     confirm = State()
 
+class AdForm(StatesGroup):
+    photos = State()
+    description = State()
+    contact = State()
+    confirm = State()
 
 def connect():
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -191,7 +196,7 @@ def keyboard(rows):
 def main_menu(uid):
     rows = [
         [("👤 Моя анкета", "profile:home"), ("🔎 Каталог", "directory:home")],
-        [("💭 Мысли", "thoughts:home")],
+        [("💭 Мысли", "thoughts:home"), ("🛒 Объявления", "ads:home")], # <--- ДОБАВИТЬ СЮДА
         [("🏆 Топ-10 авторов", "contest:home")],
         [("⚙️ Настройки", "settings:home"), ("ℹ️ Помощь", "help")],
     ]
@@ -203,7 +208,7 @@ def main_menu(uid):
 def bottom_menu(uid):
     kb = [
         [KeyboardButton(text="👤 Моя анкета"), KeyboardButton(text="🔎 Каталог")],
-        [KeyboardButton(text="💭 Мысли"), KeyboardButton(text="🏆 Топ-10")],
+        [KeyboardButton(text="💭 Мысли"), KeyboardButton(text="🏆 Топ-10")], KeyboardButton(text="🛒 Объявления")], # <--- ЗАМЕНИТЬ СТРОКУ
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="ℹ️ Помощь")],
     ]
     if is_admin(uid):
@@ -401,6 +406,15 @@ async def msg_thoughts_home(message: Message, state: FSMContext):
     text, markup = get_post_card(latest["id"], message.from_user.id)
     await message.answer(text, reply_markup=markup)
 
+@router.message(F.text == "🛒 Объявления")
+async def msg_ads_home(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("🛒 <b>Объявления</b>\nЗдесь можно купить, продать или обменять вещи для квадробики.", reply_markup=keyboard([
+        [("📋 Смотреть ленту", "ads:view:0")],
+        [("➕ Создать объявление", "ads:create")],
+        [("👤 Мои объявления", "ads:my")],
+        [("⬅️ Главное меню", "home")]
+    ]))
 
 @router.message(F.text == "🏆 Топ-10")
 async def msg_contest_home(message: Message, state: FSMContext):
@@ -450,6 +464,7 @@ async def msg_admin_home(message: Message, state: FSMContext):
         [("🚩 Жалобы", "admin:reports")],
         [("📢 Рассылка", "admin:broadcast")],
         [("💭 Мысли", "admin:thoughts")],
+                [("🛒 Объявления", "admin:ads")], # <--- В АДМИН-ПАНЕЛЬ
     ]))
 
 @router.callback_query(F.data.startswith("admin:users:"))
@@ -1756,6 +1771,297 @@ async def broadcast_go(call: CallbackQuery, state: FSMContext):
         reply_markup=keyboard([[("⬅️ Админ-панель", "admin:home")]]),
     )
 
+# ---------------- ADS (ОБЪЯВЛЕНИЯ) ----------------
+
+def get_ad_card(ad_id: int, current_user_id: int):
+    with connect() as con:
+        ad = con.execute("""SELECT a.*, p.nickname FROM ads a 
+                            LEFT JOIN profiles p ON a.author_id = p.telegram_id 
+                            WHERE a.id = ? AND a.status = 'active'""", (ad_id,)).fetchone()
+        if not ad:
+            return None, None
+        
+        photos = con.execute("SELECT file_id FROM ad_photos WHERE ad_id=? ORDER BY position", (ad_id,)).fetchall()
+        photo_ids = [p["file_id"] for p in photos]
+        
+        # Ищем следующее и предыдущее
+        next_ad = con.execute("SELECT id FROM ads WHERE status='active' AND id < ? ORDER BY id DESC LIMIT 1", (ad_id,)).fetchone()
+        prev_ad = con.execute("SELECT id FROM ads WHERE status='active' AND id > ? ORDER BY id ASC LIMIT 1", (ad_id,)).fetchone()
+
+    author = ad["nickname"] or "Аноним"
+    time_str = time_ago(ad["created_at"])
+    
+    text = f"🛒 <b>Объявление #{ad['id']}</b>\n\n"
+    text += f"👤 <b>Автор:</b> {escape(author)} · {time_str}\n"
+    text += f"💬 <b>Описание:</b>\n{escape(ad['description'])}\n\n"
+    text += f"🔗 <b>Связаться:</b> {escape(ad['contact'])}"
+    
+    rows = []
+    
+    # Навигация
+    nav_row = []
+    if prev_ad: nav_row.append(("◀️ Назад", f"ads:view:{prev_ad['id']}"))
+    if next_ad: nav_row.append(("Далее ▶️", f"ads:view:{next_ad['id']}"))
+    if nav_row: rows.append(nav_row)
+    
+    rows.append([("🚩 Пожаловаться", f"ad_report:{ad_id}"), ("⬅️ К объявлениям", "ads:home")])
+    
+    if ad["author_id"] == current_user_id or is_admin(current_user_id):
+        rows.append([("🗑 Удалить", f"ad_delete:{ad_id}")])
+        
+    return text, photo_ids, keyboard(rows)
+
+
+@router.callback_query(F.data == "ads:home")
+async def ads_home(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await edit_message(call, "🛒 <b>Объявления</b>\nЗдесь можно купить, продать или обменять вещи для квадробики.", reply_markup=keyboard([
+        [("📋 Смотреть ленту", "ads:view:0")],
+        [("➕ Создать объявление", "ads:create")],
+        [("👤 Мои объявления", "ads:my")],
+        [("⬅️ Главное меню", "home")]
+    ]))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("ads:view:"))
+async def ads_view(call: CallbackQuery):
+    ad_id = int(call.data.split(":")[2])
+    if ad_id == 0:
+        with connect() as con:
+            latest = con.execute("SELECT id FROM ads WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
+        if not latest:
+            return await edit_message(call, "🛒 <b>Объявления</b>\n\nПока нет актуальных объявлений. Стань первым!", reply_markup=keyboard([
+                [("➕ Создать объявление", "ads:create")],
+                [("⬅️ Назад", "ads:home")]
+            ]))
+        ad_id = latest["id"]
+
+    text, photos, markup = get_ad_card(ad_id, call.from_user.id)
+    if not text:
+        return await edit_message(call, "Объявление удалено или скрыто.", reply_markup=back("ads:home"))
+
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+    if photos:
+        from aiogram.types import InputMediaPhoto
+        if len(photos) == 1:
+            await call.message.answer_photo(photos[0], caption=text, reply_markup=markup)
+        else:
+            media_group = [InputMediaPhoto(media=p) for p in photos[:10]]
+            # В Telegram нельзя прикрепить клавиатуру к альбому, поэтому отправляем альбом, а потом текст с кнопками
+            await call.message.answer_media_group(media_group)
+            await call.message.answer(text, reply_markup=markup)
+    else:
+        await call.message.answer(text, reply_markup=markup)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("ad_report:"))
+async def ad_report(call: CallbackQuery, state: FSMContext):
+    ad_id = int(call.data.split(":")[1])
+    with connect() as con:
+        ad = con.execute("SELECT author_id FROM ads WHERE id=?", (ad_id,)).fetchone()
+        if not ad: return await call.answer("Объявление не найдено", show_alert=True)
+    
+    await state.update_data(target_id=ad["author_id"], report_type=f"Объявление #{ad_id}")
+    await state.set_state(ReportForm.reason)
+    await edit_message(call, "🚩 <b>Жалоба на объявление</b>\n\nВыбери причину:", reply_markup=keyboard([
+        [("🛑 Спам / реклама", "rep_reason:Спам / реклама")],
+        [("🤡 Мошенничество", "rep_reason:Мошенничество")],
+        [("✖️ Отмена", "cancel")]
+    ]))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("ad_delete:"))
+async def ad_delete(call: CallbackQuery):
+    ad_id = int(call.data.split(":")[1])
+    with connect() as con:
+        ad = con.execute("SELECT author_id FROM ads WHERE id=?", (ad_id,)).fetchone()
+        if not ad: return await call.answer("Уже удалено", show_alert=True)
+        if ad["author_id"] != call.from_user.id and not is_admin(call.from_user.id):
+            return await call.answer("Нет прав.", show_alert=True)
+        con.execute("UPDATE ads SET status='deleted' WHERE id=?", (ad_id,))
+    await call.answer("Объявление удалено")
+    await ads_home(call, state=None)
+
+
+# --- Мои объявления ---
+@router.callback_query(F.data == "ads:my")
+async def ads_my(call: CallbackQuery):
+    with connect() as con:
+        ads = con.execute("SELECT id, description FROM ads WHERE author_id=? AND status='active' ORDER BY id DESC", (call.from_user.id,)).fetchall()
+    
+    if not ads:
+        return await edit_message(call, "У вас пока нет активных объявлений.", reply_markup=back("ads:home"))
+        
+    rows = []
+    for ad in ads:
+        short_text = ad["description"][:20] + "..." if len(ad["description"]) > 20 else ad["description"]
+        rows.append([(f"#{ad['id']} - {short_text}", f"ads:view:{ad['id']}")])
+    rows.append([("⬅️ Назад", "ads:home")])
+    
+    await edit_message(call, "👤 <b>Ваши объявления</b>\nНажмите, чтобы посмотреть или удалить:", reply_markup=keyboard(rows))
+    await call.answer()
+
+
+# --- Создание объявления ---
+@router.callback_query(F.data == "ads:create")
+async def ads_create(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.update_data(photos=[])
+    await state.set_state(AdForm.photos)
+    await edit_message(call, "📸 <b>Шаг 1 из 3: Фотографии</b>\n\nОтправьте до 3 фотографий (по одной). Когда закончите — нажмите «Дальше».", reply_markup=keyboard([
+        [("Готово, дальше ➡️", "ads:photos_done")],
+        [("✖️ Отмена", "cancel")]
+    ]))
+    await call.answer()
+
+
+@router.message(AdForm.photos)
+async def ads_photos(message: Message, state: FSMContext):
+    if not message.photo:
+        return await message.answer("Пожалуйста, отправьте именно фотографию (не файл).", reply_markup=keyboard([[("Готово, дальше ➡️", "ads:photos_done")], [("✖️ Отмена", "cancel")]]))
+    
+    data = await state.get_data()
+    photos = data.get("photos", [])
+    
+    if len(photos) >= 3:
+        return await message.answer("Максимум 3 фото. Нажмите «Готово, дальше» или удалите лишнее (отмените).")
+        
+    photos.append(message.photo[-1].file_id)
+    await state.update_data(photos=photos)
+    await message.answer(f"✅ Фото {len(photos)}/3 добавлено. Можете отправить ещё или нажать «Готово».", reply_markup=keyboard([
+        [("Готово, дальше ➡️", "ads:photos_done")],
+        [("✖️ Отмена", "cancel")]
+    ]))
+
+
+@router.callback_query(F.data == "ads:photos_done")
+async def ads_photos_done(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("photos"):
+        return await call.answer("Добавьте хотя бы одно фото!", show_alert=True)
+    
+    await state.set_state(AdForm.description)
+    await edit_message(call, "📝 <b>Шаг 2 из 3: Описание</b>\n\nНапишите, что вы продаёте/отдаёте (до 500 символов). Укажите размер, состояние и т.д.", reply_markup=cancel_kb())
+    await call.answer()
+
+
+@router.message(AdForm.description)
+async def ads_description(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    if not text or len(text) > 500:
+        return await message.answer("Описание должно быть от 1 до 500 символов.", reply_markup=cancel_kb())
+    
+    await state.update_data(description=text)
+    await state.set_state(AdForm.contact)
+    await message.answer("🔗 <b>Шаг 3 из 3: Контакты</b>\n\nНапишите ваш @username (или ссылку на канал), чтобы с вами могли связаться.", reply_markup=cancel_kb())
+
+
+@router.message(AdForm.contact)
+async def ads_contact(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    if len(text) < 4:
+        return await message.answer("Слишком короткий контакт. Напишите ваш @username.", reply_markup=cancel_kb())
+        
+    await state.update_data(contact=text)
+    await state.set_state(AdForm.confirm)
+    
+    data = await state.get_data()
+    desc = escape(data['description'])
+    contact = escape(text)
+    
+    await message.answer(
+        f"👀 <b>Предпросмотр объявления</b>\n\n"
+        f"💬 <b>Описание:</b>\n{desc}\n\n"
+        f"🔗 <b>Связаться:</b> {contact}\n\n"
+        f"Опубликовать?",
+        reply_markup=keyboard([
+            [("✅ Опубликовать", "ads:publish")],
+            [("✖️ Отмена", "cancel")]
+        ])
+    )
+
+
+@router.callback_query(F.data == "ads:publish", AdForm.confirm)
+async def ads_publish(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    photos = data.get("photos", [])
+    desc = data.get("description")
+    contact = data.get("contact")
+    
+    if not photos or not desc or not contact:
+        await state.clear()
+        return await call.answer("Ошибка данных. Начните заново.", show_alert=True)
+        
+    await state.clear()
+    
+    with connect() as con:
+        # Создаем объявление
+        cur = con.execute("INSERT INTO ads(author_id, description, contact) VALUES(?,?,?)", (call.from_user.id, desc, contact))
+        ad_id = cur.lastrowid
+        
+        # Сохраняем фото
+        for i, file_id in enumerate(photos):
+            con.execute("INSERT INTO ad_photos(ad_id, file_id, position) VALUES(?,?,?)", (ad_id, file_id, i))
+            
+    await call.answer("✅ Объявление опубликовано!")
+    await ads_view_by_id(call, ad_id)
+
+
+# Вспомогательная функция для открытия объявления по ID (аналог ads_view, но для только что созданного)
+async def ads_view_by_id(call: CallbackQuery, ad_id: int):
+    text, photos, markup = get_ad_card(ad_id, call.from_user.id)
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    
+    if photos:
+        from aiogram.types import InputMediaPhoto
+        if len(photos) == 1:
+            await call.message.answer_photo(photos[0], caption=text, reply_markup=markup)
+        else:
+            media_group = [InputMediaPhoto(media=p) for p in photos[:10]]
+            await call.message.answer_media_group(media_group)
+            await call.message.answer(text, reply_markup=markup)
+    else:
+        await call.message.answer(text, reply_markup=markup)
+
+
+# --- Админка объявлений ---
+@router.callback_query(F.data == "admin:ads")
+async def admin_ads(call: CallbackQuery):
+    if not is_admin(call.from_user.id): return await call.answer("Нет доступа", show_alert=True)
+    with connect() as con:
+        ads = con.execute("SELECT id, description FROM ads WHERE status='active' ORDER BY id DESC LIMIT 10").fetchall()
+    
+    if not ads:
+        return await edit_message(call, "Активных объявлений нет.", reply_markup=back("admin:home"))
+        
+    rows = []
+    for ad in ads:
+        short_text = ad["description"][:20] + "..." if len(ad["description"]) > 20 else ad["description"]
+        rows.append([(f"❌ Скрыть #{ad['id']}: {short_text}", f"admin:ad_hide:{ad['id']}")])
+    rows.append([("⬅️ Админ-панель", "admin:home")])
+    
+    await edit_message(call, "🛒 <b>Управление объявлениями</b>", reply_markup=keyboard(rows))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("admin:ad_hide:"))
+async def admin_ad_hide(call: CallbackQuery):
+    if not is_admin(call.from_user.id): return await call.answer("Нет доступа", show_alert=True)
+    ad_id = int(call.data.split(":")[2])
+    with connect() as con:
+        con.execute("UPDATE ads SET status='hidden' WHERE id=?", (ad_id,))
+    await call.answer("Объявление скрыто")
+    await admin_ads(call)
 
 # ---------------- ENTRYPOINT ----------------
 
