@@ -1843,10 +1843,17 @@ async def admin_ad_hide(call: CallbackQuery):
 async def main():
     logging.basicConfig(level=logging.INFO)
     init_db()
+    
+    # Если бот перезапускается, глобальный роутер уже может быть привязан к старому диспетчеру.
+    # На всякий случай отвязываем его (хак для перезапусков на хостингах)
+    global router
+    if getattr(router, "_parent_router", None) is not None:
+        router._parent_router = None
+
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main()))
