@@ -2030,23 +2030,48 @@ async def ads_publish(call: CallbackQuery, state: FSMContext):
 
 
 # Вспомогательная функция для открытия объявления по ID (аналог ads_view, но для только что созданного)
-async def ads_view_by_id(call: CallbackQuery, ad_id: int):
+async def send_ad_message(call: CallbackQuery, ad_id: int):
+    """Отправляет карточку объявления с навигацией"""
     text, photos, markup = get_ad_card(ad_id, call.from_user.id)
+    if not text:
+        return await edit_message(call, "Объявление удалено или скрыто.", reply_markup=back("ads:home"))
+
+    # Удаляем текущее сообщение (кнопку, на которую нажали)
     try:
         await call.message.delete()
     except Exception:
         pass
-    
+
     if photos:
-        from aiogram.types import InputMediaPhoto
         if len(photos) == 1:
             await call.message.answer_photo(photos[0], caption=text, reply_markup=markup)
         else:
+            # Если фото несколько, отправляем альбом
             media_group = [InputMediaPhoto(media=p) for p in photos[:10]]
             await call.message.answer_media_group(media_group)
+            # А под ним отправляем текст с кнопками
             await call.message.answer(text, reply_markup=markup)
     else:
         await call.message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("ads:view:"))
+async def ads_view(call: CallbackQuery):
+    ad_id = int(call.data.split(":")[2])
+    
+    # Если это первый вход в ленту (ad_id == 0), ищем самое новое объявление
+    if ad_id == 0:
+        with connect() as con:
+            latest = con.execute("SELECT id FROM ads WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
+        if not latest:
+            return await edit_message(call, "🛒 <b>Объявления</b>\n\nПока нет актуальных объявлений. Стань первым!", reply_markup=keyboard([
+                [("➕ Создать объявление", "ads:create")],
+                [("⬅️ Назад", "ads:home")]
+            ]))
+        ad_id = latest["id"]
+
+    await send_ad_message(call, ad_id)
+    await call.answer()
 
 
 # --- Админка объявлений ---
@@ -2087,6 +2112,10 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
     await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 
 if __name__ == "__main__":
